@@ -10,8 +10,10 @@ from typing import Any, Dict, List
 import pandas as pd
 import streamlit as st
 from docx import Document
+from docx.shared import Pt
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
+from reportlab.lib.utils import simpleSplit
 
 import monitor
 
@@ -55,64 +57,128 @@ def _export_excel(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
-def _export_word(df: pd.DataFrame) -> bytes:
+def _record_sections(record: Dict[str, Any]) -> List[tuple[str, Any]]:
+    debtor = record.get("debtor") if isinstance(record.get("debtor"), dict) else {}
+    proposer_names: List[str] = []
+    proposers = record.get("proposers")
+    if isinstance(proposers, list):
+        for proposer in proposers:
+            if isinstance(proposer, dict):
+                name = proposer.get("corporate_body_name")
+                if name:
+                    proposer_names.append(str(name))
+            elif proposer:
+                proposer_names.append(str(proposer))
+
+    return [
+        ("ID", record.get("id", "")),
+        ("Dataset", record.get("dataset", "")),
+        ("Court", record.get("court_name", "")),
+        ("File reference", record.get("file_reference", "")),
+        ("Kind", record.get("kind", "")),
+        ("Released date", record.get("released_date", "")),
+        ("Updated at", record.get("updated_at", "")),
+        ("Debtor company", debtor.get("corporate_body_name") or record.get("corporate_body_name", "")),
+        ("Company CIN", debtor.get("cin") or record.get("cin", "")),
+        ("Proposers", "; ".join(proposer_names)),
+        ("Heading", record.get("heading", "")),
+        ("Decision", record.get("decision", "")),
+        ("Announcement", record.get("announcement", "")),
+        ("Advice", record.get("advice", "")),
+    ]
+
+
+def _export_word(df: pd.DataFrame, records: List[Dict[str, Any]], summary: Dict[str, Any]) -> bytes:
     doc = Document()
     doc.add_heading("Legal Monitor Results", level=1)
+    normal_style = doc.styles["Normal"]
+    normal_style.font.name = "Calibri"
+    normal_style.font.size = Pt(10)
+
     doc.add_paragraph(f"Generated: {dt.datetime.utcnow().isoformat()}Z")
+    doc.add_heading("Search parameters", level=2)
+    doc.add_paragraph(f"From: {summary.get('since', '-')}")
+    doc.add_paragraph(f"To: {summary.get('to', '-')}")
+    doc.add_paragraph(f"Query: {summary.get('query', '')}")
+    doc.add_paragraph(f"Search mode: {summary.get('search_mode', '')}")
+    if "window_days" in summary:
+        doc.add_paragraph(f"Window days: {summary.get('window_days')}")
+    doc.add_paragraph(f"Fetched records: {summary.get('fetched', 0)}")
+    doc.add_paragraph(f"Matched records: {summary.get('matches', 0)}")
 
     if df.empty:
         doc.add_paragraph("No results found.")
     else:
-        table = doc.add_table(rows=1, cols=len(df.columns))
-        hdr_cells = table.rows[0].cells
-        for i, col in enumerate(df.columns):
-            hdr_cells[i].text = str(col)
-
-        for _, row in df.iterrows():
-            cells = table.add_row().cells
-            for i, col in enumerate(df.columns):
-                cells[i].text = str(row[col])
+        doc.add_heading("Matching records", level=2)
+        for idx, rec in enumerate(records, 1):
+            doc.add_heading(f"Record {idx}", level=3)
+            table = doc.add_table(rows=0, cols=2)
+            table.style = "Table Grid"
+            for label, value in _record_sections(rec):
+                if value in (None, ""):
+                    continue
+                cells = table.add_row().cells
+                cells[0].text = str(label)
+                cells[1].text = str(value)
 
     output = io.BytesIO()
     doc.save(output)
     return output.getvalue()
 
 
-def _export_pdf(df: pd.DataFrame) -> bytes:
+def _export_pdf(df: pd.DataFrame, records: List[Dict[str, Any]], summary: Dict[str, Any]) -> bytes:
     output = io.BytesIO()
     c = canvas.Canvas(output, pagesize=A4)
     width, height = A4
+
+    def draw_wrapped(text: str, x: int, y: float, font_name: str = "Helvetica", font_size: int = 9) -> float:
+        max_width = width - x - 40
+        lines = simpleSplit(text, font_name, font_size, max_width)
+        c.setFont(font_name, font_size)
+        for line in lines:
+            if y < 50:
+                c.showPage()
+                y = height - 40
+                c.setFont(font_name, font_size)
+            c.drawString(x, y, line)
+            y -= 12
+        return y
+
     y = height - 40
     c.setFont("Helvetica-Bold", 12)
     c.drawString(40, y, "Legal Monitor Results")
-    y -= 20
-    c.setFont("Helvetica", 9)
-    c.drawString(40, y, f"Generated: {dt.datetime.utcnow().isoformat()}Z")
-    y -= 20
+    y = draw_wrapped(f"Generated: {dt.datetime.utcnow().isoformat()}Z", 40, y - 20)
+
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(40, y, "Search parameters")
+    y -= 16
+    summary_lines = [
+        f"From: {summary.get('since', '-')}",
+        f"To: {summary.get('to', '-')}",
+        f"Query: {summary.get('query', '')}",
+        f"Search mode: {summary.get('search_mode', '')}",
+        f"Fetched records: {summary.get('fetched', 0)}",
+        f"Matched records: {summary.get('matches', 0)}",
+    ]
+    if "window_days" in summary:
+        summary_lines.insert(4, f"Window days: {summary.get('window_days')}")
+    for line in summary_lines:
+        y = draw_wrapped(line, 40, y)
+    y -= 6
 
     if df.empty:
-        c.drawString(40, y, "No results found.")
+        y = draw_wrapped("No results found.", 40, y)
     else:
-        for idx, row in df.iterrows():
-            c.setFont("Helvetica-Bold", 9)
-            c.drawString(40, y, f"Record {idx + 1}")
-            y -= 14
-            c.setFont("Helvetica", 8)
-            for col in df.columns:
-                line = f"{col}: {row[col]}"
-                if len(line) > 150:
-                    line = line[:147] + "..."
-                c.drawString(50, y, line)
-                y -= 12
-                if y < 40:
-                    c.showPage()
-                    y = height - 40
-                    c.setFont("Helvetica", 8)
-            y -= 6
-            if y < 40:
-                c.showPage()
-                y = height - 40
-                c.setFont("Helvetica", 8)
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(40, y, "Matching records")
+        y -= 16
+        for idx, record in enumerate(records, 1):
+            y = draw_wrapped(f"Record {idx}", 40, y, font_name="Helvetica-Bold", font_size=10)
+            for label, value in _record_sections(record):
+                if value in (None, ""):
+                    continue
+                y = draw_wrapped(f"{label}: {value}", 50, y, font_size=8)
+            y -= 4
 
     c.save()
     return output.getvalue()
@@ -241,13 +307,13 @@ if summary is not None:
     )
     st.download_button(
         "Download Word",
-        data=_export_word(df),
+        data=_export_word(df, records, summary),
         file_name="results.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
     st.download_button(
         "Download PDF",
-        data=_export_pdf(df),
+        data=_export_pdf(df, records, summary),
         file_name="results.pdf",
         mime="application/pdf",
     )
