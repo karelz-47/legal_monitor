@@ -73,32 +73,49 @@ Lists the Python dependencies: `requests`, `resend` and `streamlit`.
 
 ## Configuration
 
-The monitor uses the Resend email service.  Before running it you
+The monitor uses the Resend email service. Before running it you
 must set the following environment variables:
 
 * **`RESEND_API_KEY`** – Your Resend API key.
-* **`RESEND_FROM_EMAIL`** – A verified email address within your
-  Resend account.  The email will appear to be sent from this
-  address.
-* **`RESEND_TO_EMAIL`** – (Optional) Destination address.  Defaults
-  to `kzvolsky@novis.eu` if unset.
+* **`RESEND_FROM_EMAIL`** – A verified sender email in your Resend account.
 
-On each update the monitor saves the current UTC timestamp to
-`last_run.txt`.  Subsequent runs use this timestamp to
-request only new or modified records via the `since` parameter.
+Optional monitor-specific variables:
+
+* **`MONITOR_TO_EMAILS`** – Comma-separated recipient list.
+  Defaults to `RESEND_TO_EMAIL` (if set) or `kzvolsky@novis.eu`.
+* **`MONITOR_KEYWORDS`** – Comma-separated keywords (for example: `NOVIS,Novis`).
+  The monitor runs the check for each keyword and deduplicates results.
+* **`MONITOR_DAYS_BACK`** – Number of days to look back (default: `5`).
+* **`MONITOR_SEARCH_MODE`** – `full_text` (default), `targeted`, or `combined`.
+
+When matches are found, the email includes attachments:
+
+* Word template (`docs/legal_monitor_template.docx`)
+* PDF preview (`docs/legal_monitor_template_preview.pdf`)
+* Generated XLSX report (`novis_matches.xlsx`) with the matching records
+
 
 ## Scheduling
 
 The project does not include a built‑in scheduler to avoid blocking
-the Streamlit interface.  Deployments are expected to schedule the
+the Streamlit interface. Deployments are expected to schedule the
 update task using external tools such as `cron`, `systemd` timers or
-task queues.  For example, to run the monitor every hour you could
-add a cron job like:
+task queues.
+
+To run every hour and check the last 5 days for `NOVIS`/`Novis`, add:
 
 ```cron
-0 * * * * /usr/bin/env bash -c \
-  'cd /path/to/legal_monitor && \n+   RESEND_API_KEY=your_key RESEND_FROM_EMAIL=your_from \n+   RESEND_TO_EMAIL=your_to python monitor.py >> monitor.log 2>&1'
+0 * * * * cd /path/to/novis_legal_monitor && \
+  RESEND_API_KEY=your_key \
+  RESEND_FROM_EMAIL=alerts@your-domain.tld \
+  MONITOR_TO_EMAILS=kzvolsky@novis.eu \
+  MONITOR_KEYWORDS=NOVIS,Novis \
+  MONITOR_DAYS_BACK=5 \
+  python monitor.py >> monitor.log 2>&1
 ```
+
+You can edit only the env values (`MONITOR_TO_EMAILS`, `MONITOR_KEYWORDS`,
+`MONITOR_DAYS_BACK`) without changing code.
 
 ## Limitations
 

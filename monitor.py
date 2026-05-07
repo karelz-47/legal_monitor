@@ -40,6 +40,7 @@ import datetime as _dt
 import os
 import re
 import base64
+import io
 import requests
 import logging
 from typing import Any, Dict, List, Optional
@@ -63,7 +64,9 @@ DATASETS = [
 ]
 
 # Regular expression for case‑insensitive matching of "NOVIS"
-NOVIS_PATTERN = re.compile(r"novis", re.IGNORECASE)
+DEFAULT_QUERY = "NOVIS"
+DEFAULT_DAYS_BACK = 5
+DEFAULT_RECIPIENT = "kzvolsky@novis.eu"
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -294,6 +297,82 @@ def _normalize_attachments(attachments: Optional[List[Dict[str, Any]]]) -> List[
             normalized_item["content_type"] = str(content_type)
         normalized.append(normalized_item)
     return normalized
+
+
+def _parse_list_env(var_name: str, default_values: List[str]) -> List[str]:
+    raw = os.environ.get(var_name, "")
+    if not raw.strip():
+        return default_values
+    values = [part.strip() for part in raw.split(",") if part.strip()]
+    return values or default_values
+
+
+def _parse_days_back_env() -> int:
+    raw_value = os.environ.get("MONITOR_DAYS_BACK", str(DEFAULT_DAYS_BACK)).strip()
+    try:
+        parsed = int(raw_value)
+        if parsed < 0:
+            raise ValueError
+        return parsed
+    except ValueError:
+        logger.warning("Invalid MONITOR_DAYS_BACK=%r, falling back to %d", raw_value, DEFAULT_DAYS_BACK)
+        return DEFAULT_DAYS_BACK
+
+
+def _build_xlsx_attachment(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    output = io.BytesIO()
+    try:
+        import xlsxwriter  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("xlsxwriter is required to generate XLSX attachments") from exc
+
+    workbook = xlsxwriter.Workbook(output, {"in_memory": True})
+    sheet = workbook.add_worksheet("matches")
+    headers = ["id", "released_date", "kind", "company", "court_name", "file_reference"]
+    for col, header in enumerate(headers):
+        sheet.write(0, col, header)
+    for row_idx, rec in enumerate(records, start=1):
+        debtor = rec.get("debtor") if isinstance(rec.get("debtor"), dict) else {}
+        company = debtor.get("corporate_body_name") if isinstance(debtor, dict) else None
+        company = company or rec.get("corporate_body_name") or ""
+        row = [
+            rec.get("id", ""),
+            rec.get("released_date", ""),
+            rec.get("kind", ""),
+            company,
+            rec.get("court_name", ""),
+            rec.get("file_reference", ""),
+        ]
+        for col, value in enumerate(row):
+            sheet.write(row_idx, col, str(value) if value is not None else "")
+    workbook.close()
+    output.seek(0)
+    return {
+        "filename": "novis_matches.xlsx",
+        "content": output.read(),
+        "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }
+
+
+def _default_email_attachments(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    attachments: List[Dict[str, Any]] = []
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    static_candidates = [
+        ("docs/legal_monitor_template.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        ("docs/legal_monitor_template_preview.pdf", "application/pdf"),
+    ]
+    for rel_path, content_type in static_candidates:
+        abs_path = os.path.join(current_dir, rel_path)
+        if not os.path.exists(abs_path):
+            continue
+        with open(abs_path, "rb") as file_handle:
+            attachments.append({
+                "filename": os.path.basename(abs_path),
+                "content": file_handle.read(),
+                "content_type": content_type,
+            })
+    attachments.append(_build_xlsx_attachment(records))
+    return attachments
 def format_records_html(records: List[Dict[str, Any]], query_context: Optional[Dict[str, Any]] = None) -> str:
     """Construct an HTML representation of the records for inclusion in an email.
 
@@ -553,22 +632,58 @@ def perform_update(
 
 def main() -> None:
     """Entry point when running this module as a script."""
-    # Determine the path for storing the last run timestamp relative to this file
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    ts_path = os.path.join(current_dir, "last_run.txt")
-    last_ts = load_last_run_timestamp(ts_path)
-    if not last_ts:
-        # Default to 30 days ago if there is no record of previous runs
-        last_dt = _dt.datetime.utcnow() - _dt.timedelta(days=30)
-        last_ts = last_dt.isoformat() + "Z"
-    logger.info("Fetching updates since %s", last_ts)
-    summary = perform_update(last_ts)
-    logger.info(
-        "Fetched %(fetched)d records, %(matches)d matched, email_sent=%(email_sent)s",
-        summary,
+    keywords = _parse_list_env("MONITOR_KEYWORDS", [DEFAULT_QUERY])
+    recipients = _parse_list_env(
+        "MONITOR_TO_EMAILS",
+        [os.environ.get("RESEND_TO_EMAIL", DEFAULT_RECIPIENT)],
     )
-    # Save the new timestamp for next run
-    save_last_run_timestamp(ts_path, summary["timestamp"])
+    days_back = _parse_days_back_env()
+    search_mode = os.environ.get("MONITOR_SEARCH_MODE", "full_text").strip() or "full_text"
+
+    logger.info(
+        "Running monitor with keywords=%s, days_back=%d, recipients=%s",
+        keywords,
+        days_back,
+        recipients,
+    )
+
+    aggregated_matches: List[Dict[str, Any]] = []
+    aggregated_fetched = 0
+    last_summary: Optional[Dict[str, Any]] = None
+    for keyword in keywords:
+        summary = perform_update_last_n_days(
+            days=days_back,
+            query=keyword,
+            search_mode=search_mode,
+            send_notifications=False,
+            email_recipients=recipients,
+        )
+        aggregated_fetched += int(summary.get("fetched", 0))
+        aggregated_matches.extend(summary.get("records", []))
+        last_summary = summary
+
+    unique_matches = [dict(item) for item in {str(rec.get("id", "")) + str(rec.get("file_reference", "")): rec for rec in aggregated_matches}.values()]
+
+    email_result = None
+    if unique_matches:
+        attachments = _default_email_attachments(unique_matches)
+        query_context = {
+            "query": ", ".join(keywords),
+            "search_mode": search_mode,
+            "since": (last_summary or {}).get("since"),
+            "to": (last_summary or {}).get("to"),
+            "window_days": days_back,
+            "fetched": aggregated_fetched,
+            "matches": len(unique_matches),
+        }
+        email_result = send_email(unique_matches, recipients=recipients, attachments=attachments, query_context=query_context)
+
+    logger.info(
+        "Fetched %d records, %d matched, email_sent=%s",
+        aggregated_fetched,
+        len(unique_matches),
+        email_result is not None,
+    )
 
 
 if __name__ == "__main__":
