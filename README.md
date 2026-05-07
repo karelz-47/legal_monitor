@@ -117,6 +117,41 @@ To run every hour and check the last 5 days for `NOVIS`/`Novis`, add:
 You can edit only the env values (`MONITOR_TO_EMAILS`, `MONITOR_KEYWORDS`,
 `MONITOR_DAYS_BACK`) without changing code.
 
+
+## Railway deployment (UI + hourly monitor)
+
+Yes — the Streamlit UI flow stays unchanged. The UI calls monitor functions
+directly (for manual runs, filters, exports), while the cron job runs
+`python monitor.py` in a separate service/process.
+
+Recommended Railway setup:
+
+1. **UI service** (existing): runs Streamlit app, e.g.
+   `streamlit run streamlit_app.py --server.port $PORT --server.address 0.0.0.0`
+2. **Cron service** (new): same repo, same variables, start command can be simple
+   (`sleep infinity`) because schedule triggers override command execution.
+
+### Create the cron in Railway
+
+In Railway dashboard:
+
+1. Open your project and click **New Service** → **GitHub Repo**.
+2. Select this same repository.
+3. Name it e.g. `legal-monitor-cron`.
+4. Set environment variables on this cron service:
+   - `RESEND_API_KEY`
+   - `RESEND_FROM_EMAIL`
+   - `MONITOR_TO_EMAILS` (example: `kzvolsky@novis.eu`)
+   - `MONITOR_KEYWORDS` (example: `NOVIS,Novis`)
+   - `MONITOR_DAYS_BACK` (example: `5`)
+   - optional `MONITOR_SEARCH_MODE` (`full_text`, `targeted`, `combined`)
+5. Add a schedule/cron trigger with expression: `0 * * * *` (every hour).
+6. Set scheduled command to: `python monitor.py`.
+7. Save and run once manually to verify logs and email delivery.
+
+This keeps administration via env vars only, while end users continue using the
+UI with all existing capabilities.
+
 ## Limitations
 
 * The Slovensko.Digital API is rate‑limited and may return multiple

@@ -6,11 +6,11 @@ and liquidation (likvidácia) involving companies whose names contain
 
 This module encapsulates the logic for querying the public
 Slovensko.Digital data hub, filtering the returned records and sending
-notification emails via the Resend email API.  It is designed to be
+notification emails via the Resend email API. It is designed to be
 imported into a Streamlit front‑end but can also be executed as a
-stand‑alone script.  When run directly, it performs a single update
-cycle using the last timestamp stored in the `last_run.txt` file
-located alongside the module.
+stand‑alone script. When run directly, it performs a single update
+cycle over a trailing time window controlled by environment variables
+(e.g. `MONITOR_DAYS_BACK`, default 5 days).
 
 The `fetch_changes` function handles pagination through the
 synchronisation API.  The `filter_records_for_novis` function checks
@@ -29,9 +29,8 @@ Environment variables:
 Usage from the command line:
     python monitor.py
 
-This will check for new records since the last run and send a
-notification if any matching records are found.  The timestamp of
-successful runs is saved to `last_run.txt` for incremental updates.
+This checks records in the configured trailing window and sends a
+notification if any matching records are found.
 """
 
 from __future__ import annotations
