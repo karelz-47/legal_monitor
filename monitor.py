@@ -39,6 +39,7 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import re
+import base64
 import requests
 import logging
 from typing import Any, Dict, List, Optional
@@ -251,7 +252,49 @@ def filter_records_by_date_range(
     return result
 
 
-def format_records_html(records: List[Dict[str, Any]]) -> str:
+
+
+def _format_query_context_html(query_context: Optional[Dict[str, Any]]) -> str:
+    if not query_context:
+        return ""
+
+    rows = []
+    labels = [
+        ("Query", query_context.get("query") or "-"),
+        ("Search mode", query_context.get("search_mode") or "-"),
+        ("From", query_context.get("since") or "-"),
+        ("To", query_context.get("to") or "-"),
+        ("Last N days", query_context.get("window_days") if query_context.get("window_days") is not None else "-"),
+        ("Records reviewed", query_context.get("fetched") if query_context.get("fetched") is not None else "-"),
+        ("Matches", query_context.get("matches") if query_context.get("matches") is not None else "-"),
+    ]
+    for key, value in labels:
+        rows.append(f"<tr><th style='text-align:left;padding:6px 8px;border:1px solid #ddd;background:#f7f7f7'>{key}</th><td style='padding:6px 8px;border:1px solid #ddd'>{value}</td></tr>")
+    return "<h2>Search parameters used</h2><table style='border-collapse:collapse'>" + "".join(rows) + "</table>"
+
+
+def _normalize_attachments(attachments: Optional[List[Dict[str, Any]]]) -> List[Dict[str, str]]:
+    normalized: List[Dict[str, str]] = []
+    for item in attachments or []:
+        filename = item.get("filename")
+        content = item.get("content")
+        content_type = item.get("content_type")
+        if not filename or content is None:
+            continue
+        if isinstance(content, bytes):
+            content_b64 = base64.b64encode(content).decode("ascii")
+        elif isinstance(content, str):
+            content_b64 = content
+        else:
+            logger.warning("Skipping unsupported attachment content type for %s", filename)
+            continue
+
+        normalized_item: Dict[str, str] = {"filename": str(filename), "content": content_b64}
+        if content_type:
+            normalized_item["content_type"] = str(content_type)
+        normalized.append(normalized_item)
+    return normalized
+def format_records_html(records: List[Dict[str, Any]], query_context: Optional[Dict[str, Any]] = None) -> str:
     """Construct an HTML representation of the records for inclusion in an email.
 
     Each record's key fields are rendered as a table for human
@@ -269,7 +312,7 @@ def format_records_html(records: List[Dict[str, Any]]) -> str:
     """
     if not records:
         return "<p>No relevant records found.</p>"
-    html_parts = ["<h2>New NOVIS records</h2>"]
+    html_parts = ["<h1>New legal monitor records</h1>", _format_query_context_html(query_context)]
     for idx, rec in enumerate(records, 1):
         html_parts.append(f"<h3>Record {idx}</h3>")
         rows = []
@@ -308,6 +351,7 @@ def send_email(
     records: List[Dict[str, Any]],
     recipients: Optional[List[str]] = None,
     attachments: Optional[List[Dict[str, Any]]] = None,
+    query_context: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Send an email notification for the given records via Resend.
 
@@ -341,16 +385,18 @@ def send_email(
         logger.info("No email recipients provided; skipping send.")
         return None
     resend.api_key = api_key
-    subject = "NOVIS – new bankruptcy/liquidation notice"
-    html_body = format_records_html(records)
+    query_label = str((query_context or {}).get("query") or "selected query")
+    subject = f"New bankruptcy/liquidation notice for: {query_label}"
+    html_body = format_records_html(records, query_context=query_context)
     params: Dict[str, Any] = {
         "from": from_email,
         "to": to_emails,
         "subject": subject,
         "html": html_body,
     }
-    if attachments:
-        params["attachments"] = attachments
+    normalized_attachments = _normalize_attachments(attachments)
+    if normalized_attachments:
+        params["attachments"] = normalized_attachments
     try:
         response = resend.Emails.send(params)  # type: ignore[attr-defined]
         logger.info("Email sent via Resend: %s", response)

@@ -15,6 +15,8 @@ from docx.shared import Pt
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import simpleSplit
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 import monitor
 
@@ -181,10 +183,22 @@ def _export_word(df: pd.DataFrame, records: List[Dict[str, Any]], summary: Dict[
 
 def _export_pdf(df: pd.DataFrame, records: List[Dict[str, Any]], summary: Dict[str, Any]) -> bytes:
     output = io.BytesIO()
+
+    base_font = "Helvetica"
+    bold_font = "Helvetica-Bold"
+    dejavu_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    dejavu_bold_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    if os.path.exists(dejavu_path):
+        pdfmetrics.registerFont(TTFont("DejaVuSans", dejavu_path))
+        base_font = "DejaVuSans"
+    if os.path.exists(dejavu_bold_path):
+        pdfmetrics.registerFont(TTFont("DejaVuSans-Bold", dejavu_bold_path))
+        bold_font = "DejaVuSans-Bold"
+
     c = canvas.Canvas(output, pagesize=A4)
     width, height = A4
 
-    def draw_wrapped(text: str, x: int, y: float, font_name: str = "Helvetica", font_size: int = 9) -> float:
+    def draw_wrapped(text: str, x: int, y: float, font_name: str = base_font, font_size: int = 9) -> float:
         max_width = width - x - 40
         lines = simpleSplit(text, font_name, font_size, max_width)
         c.setFont(font_name, font_size)
@@ -199,26 +213,27 @@ def _export_pdf(df: pd.DataFrame, records: List[Dict[str, Any]], summary: Dict[s
 
     repl = _build_template_placeholders(records, summary)
     y = height - 40
-    c.setFont("Helvetica-Bold", 13)
+    c.setFont(bold_font, 14)
     c.drawString(40, y, "Legal Monitor Briefing")
-    y = draw_wrapped("Public registry monitoring summary for senior management", 40, y - 20)
+    y = draw_wrapped("Public registry monitoring summary for senior management", 40, y - 22, base_font, 10)
+
     y -= 8
-    c.setFont("Helvetica-Bold", 10)
-    y = draw_wrapped("Executive overview", 40, y)
-    c.setFont("Helvetica", 9)
-    overview_lines = [
+    c.setFont(bold_font, 11)
+    y = draw_wrapped("Executive overview", 40, y, bold_font, 11)
+    c.setFont(base_font, 9)
+    for line in [
         f"Monitored entity: {repl['{{SEARCH_TARGET}}']}",
         f"Reporting period: {repl['{{PERIOD_FROM}}']} - {repl['{{PERIOD_TO}}']}",
         f"Report generated: {repl['{{GENERATED_AT}}']}",
         f"Records reviewed: {repl['{{RECORDS_REVIEWED}}']}",
         f"Relevant findings: {repl['{{RELEVANT_FINDINGS}}']}",
         f"Key point: {repl['{{MANAGEMENT_SUMMARY}}']}",
-    ]
-    for line in overview_lines:
-        y = draw_wrapped(line, 40, y - 2)
-    y -= 6
-    c.setFont("Helvetica-Bold", 10)
-    y = draw_wrapped("Finding details", 40, y)
+    ]:
+        y = draw_wrapped(line, 40, y - 2, base_font, 9)
+
+    y -= 8
+    c.setFont(bold_font, 11)
+    y = draw_wrapped("Finding details", 40, y, bold_font, 11)
     details = [
         ("Headline", repl["{{FINDING_HEADLINE}}"]),
         ("Entity", repl["{{ENTITY_NAME}}"]),
@@ -229,14 +244,13 @@ def _export_pdf(df: pd.DataFrame, records: List[Dict[str, Any]], summary: Dict[s
         ("Latest registry update", repl["{{UPDATED_AT}}"]),
         ("Relevant party", repl["{{RELEVANT_PARTY}}"]),
     ]
-    c.setFont("Helvetica", 9)
     for label, value in details:
-        y = draw_wrapped(f"{label}: {value}", 40, y - 2)
-    y -= 4
-    c.setFont("Helvetica-Bold", 10)
-    y = draw_wrapped("Source extract", 40, y)
-    c.setFont("Helvetica", 8)
-    y = draw_wrapped(repl["{{SOURCE_EXTRACT}}"], 40, y - 2)
+        y = draw_wrapped(f"{label}: {value}", 40, y - 2, base_font, 9)
+
+    y -= 6
+    c.setFont(bold_font, 11)
+    y = draw_wrapped("Source extract", 40, y, bold_font, 11)
+    y = draw_wrapped(repl["{{SOURCE_EXTRACT}}"], 40, y - 2, base_font, 9)
 
     c.save()
     return output.getvalue()
@@ -429,6 +443,15 @@ if summary is not None:
                 records,
                 recipients=recipients,
                 attachments=attachments_payload,
+                query_context={
+                    "query": summary.get("query"),
+                    "search_mode": summary.get("search_mode"),
+                    "since": summary.get("since"),
+                    "to": summary.get("to"),
+                    "window_days": summary.get("window_days"),
+                    "fetched": summary.get("fetched"),
+                    "matches": summary.get("matches"),
+                },
             )
         if email_result:
             st.success("Email sent.")
