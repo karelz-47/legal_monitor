@@ -103,11 +103,36 @@ _replik_session = requests.Session()
 _replik_session.mount("https://", _ReplikTLSAdapter())
 
 
+class _ReplikTLSAdapter(HTTPAdapter):
+    """HTTPS adapter with a compatibility TLS profile for legacy SOAP endpoints."""
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):  # type: ignore[override]
+        ctx = ssl.create_default_context()
+        # REPLIK currently negotiates best with TLS 1.2 on some environments.
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        # Some servers expose only older cipher suites; keep this permissive but verified.
+        ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+        pool_kwargs["ssl_context"] = ctx
+        self.poolmanager = PoolManager(
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            **pool_kwargs,
+        )
+
+
+_replik_session = requests.Session()
+_replik_session.mount("https://", _ReplikTLSAdapter())
+
+
 def _extract_xml_records(root: ET.Element) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for elem in root.iter():
         local_name = elem.tag.split("}")[-1].lower()
-        if local_name not in {"konanie", "oznam"}:
+        # REPLIK list item nodes are typically KonanieInfo / VerejnyOznamInfo.
+        # Keep legacy names too in case of service-side schema variants.
+        if local_name not in {"konanie", "oznam", "konanieinfo", "verejnyoznaminfo"}:
             continue
         record: Dict[str, Any] = {}
         for child in list(elem):
@@ -172,7 +197,7 @@ def replik_search_by_ico(ico: str, page_size: int = 100) -> Dict[str, Any]:
 
     records = [{"dataset": "konanie", **item} for item in konanie["records"]] + [{"dataset": "oznam", **item} for item in oznam["records"]]
     return {
-        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "query": normalized_ico,
         "search_mode": "ico",
         "fetched": len(records),
@@ -209,7 +234,7 @@ def replik_search_by_date(date_from: str, date_to: str, page_size: int = 100) ->
         oznam = _call_replik(REPLIK_ALT_OZNAM_URL, "datatypes.oznam.verejnost.ru.sk.hp.com", oznam_body)
     records = [{"dataset": "konanie", **item} for item in konanie["records"]] + [{"dataset": "oznam", **item} for item in oznam["records"]]
     return {
-        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "since": date_from,
         "to": date_to,
         "query": f"{date_from}..{date_to}",
@@ -751,7 +776,7 @@ def perform_update_last_n_days(
 
     email_result = send_email(matched_records, recipients=email_recipients) if send_notifications else None
     return {
-        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "since": since,
         "to": to_timestamp,
         "query": query,
@@ -797,7 +822,7 @@ def perform_update(
         matched_records.extend(matched)
     email_result = send_email(matched_records, recipients=email_recipients) if send_notifications else None
     summary = {
-        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "since": since,
         "to": to_timestamp,
         "query": query,
