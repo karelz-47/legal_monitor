@@ -281,190 +281,196 @@ search_query = st.text_input(
         "(for example, 'Acme' matches 'ACME')."
     ),
 )
-search_scope = st.radio(
-    "Where should we look for that text?",
-    options=[
-        ("full_text", "Every available field"),
-        ("targeted", "Only names (proposers and corporate body name)"),
-        ("combined", "Names first, then all other fields"),
-    ],
-    format_func=lambda item: item[1],
-    horizontal=False,
-    help=(
-        "This setting controls which data fields are checked in each API record. "
-        "'Names first, then all other fields' starts with name fields and then checks the rest."
-    ),
-)
-window_mode = st.radio(
-    "How far back should we search?",
-    options=["Last N days", "Custom date range"],
-    horizontal=True,
-    help=(
-        "Choose a rolling period (for example, last 30 days) "
-        "or set exact start and end dates in UTC."
-    ),
-)
+tabs = st.tabs(["Slovensko.Digital Datahub", "REPLIK"])
 
-if window_mode == "Last N days":
-    trailing_days = st.number_input(
-        "Number of days to include",
-        min_value=0,
-        value=30,
-        step=1,
-        help="Example: 30 means from today back to 30 days ago (UTC).",
+with tabs[0]:
+    search_scope = st.radio(
+        "Where should we look for that text?",
+        options=[
+            ("full_text", "Every available field"),
+            ("targeted", "Only names (proposers and corporate body name)"),
+            ("combined", "Names first, then all other fields"),
+        ],
+        format_func=lambda item: item[1],
+        horizontal=False,
+        help=(
+            "This setting controls which data fields are checked in each API record. "
+            "'Names first, then all other fields' starts with name fields and then checks the rest."
+        ),
     )
-    date_from = None
-    date_to = None
-else:
-    trailing_days = None
-    default_from = (dt.datetime.utcnow() - dt.timedelta(days=30)).date()
-    date_from = st.date_input(
-        "Start date (UTC)",
-        value=default_from,
-        help="Beginning of the period to check.",
-    )
-    date_to = st.date_input(
-        "End date (UTC)",
-        value=dt.datetime.utcnow().date(),
-        help="Final date to include in the search period.",
+    window_mode = st.radio(
+        "How far back should we search?",
+        options=["Last N days", "Custom date range"],
+        horizontal=True,
+        help=(
+            "Choose a rolling period (for example, last 30 days) "
+            "or set exact start and end dates in UTC."
+        ),
     )
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-ts_path = os.path.join(current_dir, "last_run.txt")
-
-last_ts = monitor.load_last_run_timestamp(ts_path)
-if last_ts:
-    last_dt = dt.datetime.fromisoformat(last_ts.rstrip("Z"))
-    st.write(f"Last update run: {last_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-else:
-    st.write("No previous runs recorded.")
-
-if st.button("Run update"):
-    with st.spinner("Fetching updates..."):
-        if window_mode == "Last N days":
-            summary = monitor.perform_update_last_n_days(
-                int(trailing_days),
-                query=search_query,
-                search_mode=search_scope[0],
-                send_notifications=False,
-            )
-        else:
-            since_dt = dt.datetime.combine(date_from, dt.time.min)
-            to_dt = dt.datetime.combine(date_to, dt.time.max)
-            since = since_dt.isoformat() + "Z"
-            to_timestamp = to_dt.isoformat() + "Z"
-            summary = monitor.perform_update(
-                since,
-                query=search_query,
-                search_mode=search_scope[0],
-                send_notifications=False,
-                to_timestamp=to_timestamp,
-            )
-
-        monitor.save_last_run_timestamp(ts_path, summary["timestamp"])
-
-    st.session_state["last_summary"] = summary
-    st.session_state["last_records"] = summary.get("records", [])
-    st.success("Update complete.")
-
-if st.button("Clear results"):
-    st.session_state["last_summary"] = None
-    st.session_state["last_records"] = []
-    st.success("Cleared previous search results.")
-
-summary = st.session_state.get("last_summary")
-records = st.session_state.get("last_records", [])
-if summary is not None:
-    df = _records_to_dataframe(records)
-    export_basename = _build_export_basename(summary.get("query", ""))
-
-    st.subheader("Run Summary")
-    st.write({k: v for k, v in summary.items() if k != "records"})
-
-    st.subheader("Matching Results")
-    if df.empty:
-        st.info("No matching results found for the selected filters.")
+    if window_mode == "Last N days":
+        trailing_days = st.number_input(
+            "Number of days to include",
+            min_value=0,
+            value=30,
+            step=1,
+            help="Example: 30 means from today back to 30 days ago (UTC).",
+        )
+        date_from = None
+        date_to = None
     else:
-        st.dataframe(df, use_container_width=True)
+        trailing_days = None
+        default_from = (dt.datetime.utcnow() - dt.timedelta(days=30)).date()
+        date_from = st.date_input(
+            "Start date (UTC)",
+            value=default_from,
+            help="Beginning of the period to check.",
+        )
+        date_to = st.date_input(
+            "End date (UTC)",
+            value=dt.datetime.utcnow().date(),
+            help="Final date to include in the search period.",
+        )
 
-    st.subheader("Download Results")
-    st.download_button(
-        "Download XLSX",
-        data=_export_excel(df),
-        file_name=f"{export_basename}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-    st.download_button(
-        "Download Word",
-        data=_export_word(df, records, summary),
-        file_name=f"{export_basename}.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    )
-    st.download_button(
-        "Download PDF",
-        data=_export_pdf(df, records, summary),
-        file_name=f"{export_basename}.pdf",
-        mime="application/pdf",
-    )
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    ts_path = os.path.join(current_dir, "last_run.txt")
 
-    st.subheader("Email Results")
-    recipient_input = st.text_input(
-        "Recipients (comma-separated emails)",
-        value="",
-        help="No email is sent automatically. Click the button below to send.",
-    )
-    recipients = [item.strip() for item in recipient_input.split(",") if item.strip()]
-    attachment_options = st.multiselect(
-        "Attachments",
-        options=["xlsx", "pdf", "word"],
-        default=["xlsx"],
-        help="Choose one or more file formats to attach to the email.",
-    )
-    if st.button("Send via email"):
-        attachments_payload: List[Dict[str, str | bytes]] = []
-        if "xlsx" in attachment_options:
-            attachments_payload.append(
-                {
-                    "filename": f"{export_basename}.xlsx",
-                    "content": _export_excel(df),
-                    "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                }
-            )
-        if "pdf" in attachment_options:
-            attachments_payload.append(
-                {
-                    "filename": f"{export_basename}.pdf",
-                    "content": _export_pdf(df, records, summary),
-                    "content_type": "application/pdf",
-                }
-            )
-        if "word" in attachment_options:
-            attachments_payload.append(
-                {
-                    "filename": f"{export_basename}.docx",
-                    "content": _export_word(df, records, summary),
-                    "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                }
-            )
+    last_ts = monitor.load_last_run_timestamp(ts_path)
+    if last_ts:
+        last_dt = dt.datetime.fromisoformat(last_ts.rstrip("Z"))
+        st.write(f"Last update run: {last_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    else:
+        st.write("No previous runs recorded.")
 
-        with st.spinner("Sending email..."):
-            email_result = monitor.send_email(
-                records,
-                recipients=recipients,
-                attachments=attachments_payload,
-                query_context={
-                    "query": summary.get("query"),
-                    "search_mode": summary.get("search_mode"),
-                    "since": summary.get("since"),
-                    "to": summary.get("to"),
-                    "window_days": summary.get("window_days"),
-                    "fetched": summary.get("fetched"),
-                    "matches": summary.get("matches"),
-                },
-            )
-        if email_result:
-            st.success("Email sent.")
-        elif not recipients:
-            st.warning("Please add at least one recipient.")
+    if st.button("Run update"):
+        with st.spinner("Fetching updates..."):
+            if window_mode == "Last N days":
+                summary = monitor.perform_update_last_n_days(
+                    int(trailing_days),
+                    query=search_query,
+                    search_mode=search_scope[0],
+                    send_notifications=False,
+                )
+            else:
+                since_dt = dt.datetime.combine(date_from, dt.time.min)
+                to_dt = dt.datetime.combine(date_to, dt.time.max)
+                since = since_dt.isoformat() + "Z"
+                to_timestamp = to_dt.isoformat() + "Z"
+                summary = monitor.perform_update(
+                    since,
+                    query=search_query,
+                    search_mode=search_scope[0],
+                    send_notifications=False,
+                    to_timestamp=to_timestamp,
+                )
+
+            monitor.save_last_run_timestamp(ts_path, summary["timestamp"])
+
+        st.session_state["last_summary"] = summary
+        st.session_state["last_records"] = summary.get("records", [])
+        st.success("Update complete.")
+
+    if st.button("Clear results"):
+        st.session_state["last_summary"] = None
+        st.session_state["last_records"] = []
+        st.success("Cleared previous search results.")
+
+    summary = st.session_state.get("last_summary")
+    records = st.session_state.get("last_records", [])
+    if summary is not None:
+        df = _records_to_dataframe(records)
+        export_basename = _build_export_basename(summary.get("query", ""))
+
+        st.subheader("Run Summary")
+        st.write({k: v for k, v in summary.items() if k != "records"})
+
+        st.subheader("Matching Results")
+        if df.empty:
+            st.info("No matching results found for the selected filters.")
         else:
-            st.error("Email could not be sent. Check configuration and logs.")
+            st.dataframe(df, use_container_width=True)
+
+        st.subheader("Download Results")
+        st.download_button(
+            "Download XLSX",
+            data=_export_excel(df),
+            file_name=f"{export_basename}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        st.download_button(
+            "Download Word",
+            data=_export_word(df, records, summary),
+            file_name=f"{export_basename}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        st.download_button(
+            "Download PDF",
+            data=_export_pdf(df, records, summary),
+            file_name=f"{export_basename}.pdf",
+            mime="application/pdf",
+        )
+
+        st.subheader("Email Results")
+        recipient_input = st.text_input(
+            "Recipients (comma-separated emails)",
+            value="",
+            help="No email is sent automatically. Click the button below to send.",
+        )
+        recipients = [item.strip() for item in recipient_input.split(",") if item.strip()]
+        attachment_options = st.multiselect(
+            "Attachments",
+            options=["xlsx", "pdf", "word"],
+            default=["xlsx"],
+            help="Choose one or more file formats to attach to the email.",
+        )
+        if st.button("Send via email"):
+            attachments_payload: List[Dict[str, str | bytes]] = []
+            if "xlsx" in attachment_options:
+                attachments_payload.append(
+                    {
+                        "filename": f"{export_basename}.xlsx",
+                        "content": _export_excel(df),
+                        "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    }
+                )
+            if "pdf" in attachment_options:
+                attachments_payload.append(
+                    {
+                        "filename": f"{export_basename}.pdf",
+                        "content": _export_pdf(df, records, summary),
+                        "content_type": "application/pdf",
+                    }
+                )
+            if "word" in attachment_options:
+                attachments_payload.append(
+                    {
+                        "filename": f"{export_basename}.docx",
+                        "content": _export_word(df, records, summary),
+                        "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    }
+                )
+
+            with st.spinner("Sending email..."):
+                email_result = monitor.send_email(
+                    records,
+                    recipients=recipients,
+                    attachments=attachments_payload,
+                    query_context={
+                        "query": summary.get("query"),
+                        "search_mode": summary.get("search_mode"),
+                        "since": summary.get("since"),
+                        "to": summary.get("to"),
+                        "window_days": summary.get("window_days"),
+                        "fetched": summary.get("fetched"),
+                        "matches": summary.get("matches"),
+                    },
+                )
+            if email_result:
+                st.success("Email sent.")
+            elif not recipients:
+                st.warning("Please add at least one recipient.")
+            else:
+                st.error("Email could not be sent. Check configuration and logs.")
+
+with tabs[1]:
+    st.info("REPLIK tab is ready. Content will be added soon.")
