@@ -183,6 +183,37 @@ def replik_search_by_date(date_from: str, date_to: str, page_size: int = 100) ->
     }
 
 
+def replik_search_full_text(query: str, page_size: int = 100, sort: str = "Relevancia") -> Dict[str, Any]:
+    normalized_query = (query or "").strip()
+    if not normalized_query:
+        raise ValueError("Query must not be empty.")
+
+    allowed_sort = {"DatumPoslednejUdalosti", "DatumZacatiaKonania", "Relevancia"}
+    normalized_sort = sort if sort in allowed_sort else "Relevancia"
+
+    konanie_body = (
+        "<dat:vyhladajKonanieRequest>"
+        f"<dat:Query>{normalized_query}</dat:Query>"
+        "<dat:Stranka>0</dat:Stranka>"
+        f"<dat:VysledkovNaStranku>{min(page_size, 100)}</dat:VysledkovNaStranku>"
+        f"<dat:TypTriedenia>{normalized_sort}</dat:TypTriedenia>"
+        "</dat:vyhladajKonanieRequest>"
+    )
+
+    konanie = _call_replik(REPLIK_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
+    records = [{"dataset": "konanie", **item} for item in konanie["records"]]
+    return {
+        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+        "query": normalized_query,
+        "search_mode": "full_text",
+        "sort": normalized_sort,
+        "fetched": len(records),
+        "matches": len(records),
+        "records": records,
+        "raw_xml": {"konanie": konanie["raw_xml"]},
+    }
+
+
 def parse_next_link(link_header: Optional[str]) -> Optional[str]:
     """Parse the HTTP Link header and extract the URL for the next page.
 

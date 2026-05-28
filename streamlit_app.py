@@ -473,8 +473,8 @@ with tabs[0]:
                 st.error("Email could not be sent. Check configuration and logs.")
 
 with tabs[1]:
-    st.caption("Search REPLIK by exact IČO or by date period.")
-    replik_mode = st.radio("REPLIK search type", options=["IČO", "Date period"], horizontal=True)
+    st.caption("Search REPLIK by exact IČO, full-text query, or date period.")
+    replik_mode = st.radio("REPLIK search type", options=["IČO", "Full-text", "Date period"], horizontal=True)
     replik_summary: Dict[str, Any] | None = None
 
     if replik_mode == "IČO":
@@ -483,6 +483,27 @@ with tabs[1]:
             try:
                 with st.spinner("Querying REPLIK..."):
                     replik_summary = monitor.replik_search_by_ico(replik_ico)
+                st.success("REPLIK search complete.")
+            except Exception as exc:
+                st.error(f"REPLIK query failed: {exc}")
+    elif replik_mode == "Full-text":
+        replik_query = st.text_input(
+            "Full-text query",
+            value="",
+            help="Search by company/person name, partial text, IČO-like text, or court reference.",
+        )
+        replik_sort = st.selectbox(
+            "Sort",
+            options=["Relevancia", "DatumPoslednejUdalosti", "DatumZacatiaKonania"],
+            index=0,
+        )
+        st.warning(
+            "Search mode: Full-text match. Review debtor name/IČO and court file reference before treating the result as a match."
+        )
+        if st.button("Search REPLIK by full-text"):
+            try:
+                with st.spinner("Querying REPLIK..."):
+                    replik_summary = monitor.replik_search_full_text(replik_query, sort=replik_sort)
                 st.success("REPLIK search complete.")
             except Exception as exc:
                 st.error(f"REPLIK query failed: {exc}")
