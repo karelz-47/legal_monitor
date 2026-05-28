@@ -43,7 +43,10 @@ import io
 import requests
 import logging
 import xml.etree.ElementTree as ET
+import ssl
 from typing import Any, Dict, List, Optional
+from requests.adapters import HTTPAdapter
+from urllib3.poolmanager import PoolManager
 
 try:
     import resend  # type: ignore
@@ -75,6 +78,29 @@ REPLIK_KONANIE_URL = "https://replik-ws.justice.sk/ru-verejnost-ws/konanieServic
 REPLIK_OZNAM_URL = "https://replik-ws.justice.sk/ru-verejnost-ws/oznamService"
 
 
+class _ReplikTLSAdapter(HTTPAdapter):
+    """HTTPS adapter with a compatibility TLS profile for legacy SOAP endpoints."""
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):  # type: ignore[override]
+        ctx = ssl.create_default_context()
+        # REPLIK currently negotiates best with TLS 1.2 on some environments.
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        # Some servers expose only older cipher suites; keep this permissive but verified.
+        ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+        pool_kwargs["ssl_context"] = ctx
+        self.poolmanager = PoolManager(
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            **pool_kwargs,
+        )
+
+
+_replik_session = requests.Session()
+_replik_session.mount("https://", _ReplikTLSAdapter())
+
+
 def _extract_xml_records(root: ET.Element) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for elem in root.iter():
@@ -100,7 +126,7 @@ def _call_replik(endpoint_url: str, action: str, body_xml: str) -> Dict[str, Any
     {body_xml}
   </soapenv:Body>
 </soapenv:Envelope>"""
-    response = requests.post(
+    response = _replik_session.post(
         endpoint_url,
         data=envelope.encode("utf-8"),
         headers={"Content-Type": "text/xml; charset=utf-8", "Accept": "text/xml"},
