@@ -134,7 +134,7 @@ def _build_template_placeholders(records: List[Dict[str, Any]], summary: Dict[st
         management_summary += f" The latest highlighted record is '{finding_headline}' for entity '{entity_name}'."
 
     return {
-        "{{GENERATED_AT}}": dt.datetime.utcnow().strftime("%d %B %Y, %H:%M UTC"),
+        "{{GENERATED_AT}}": dt.datetime.now(dt.timezone.utc).strftime("%d %B %Y, %H:%M UTC"),
         "{{SEARCH_TARGET}}": str(summary.get("query", "-")),
         "{{PERIOD_FROM}}": _format_date(summary.get("since")),
         "{{PERIOD_TO}}": _format_date(summary.get("to")),
@@ -268,7 +268,7 @@ def _export_pdf(df: pd.DataFrame, records: List[Dict[str, Any]], summary: Dict[s
 def _build_export_basename(search_query: str) -> str:
     cleaned_query = re.sub(r"[^A-Za-z0-9]", "", (search_query or ""))
     query_part = (cleaned_query[:10] if cleaned_query else "NoQuery")
-    timestamp = dt.datetime.utcnow()
+    timestamp = dt.datetime.now(dt.timezone.utc)
     return f"LegalMonitor_{query_part}_{timestamp:%d%m%Y}_{timestamp:%H%M%S}"
 
 
@@ -320,7 +320,7 @@ with tabs[0]:
         date_to = None
     else:
         trailing_days = None
-        default_from = (dt.datetime.utcnow() - dt.timedelta(days=30)).date()
+        default_from = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).date()
         date_from = st.date_input(
             "Start date (UTC)",
             value=default_from,
@@ -328,7 +328,7 @@ with tabs[0]:
         )
         date_to = st.date_input(
             "End date (UTC)",
-            value=dt.datetime.utcnow().date(),
+            value=dt.datetime.now(dt.timezone.utc).date(),
             help="Final date to include in the search period.",
         )
 
@@ -487,9 +487,9 @@ with tabs[1]:
             except Exception as exc:
                 st.error(f"REPLIK query failed: {exc}")
     else:
-        default_from = (dt.datetime.utcnow() - dt.timedelta(days=30)).date()
+        default_from = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).date()
         replik_from = st.date_input("From date", value=default_from, key="replik_from")
-        replik_to = st.date_input("To date", value=dt.datetime.utcnow().date(), key="replik_to")
+        replik_to = st.date_input("To date", value=dt.datetime.now(dt.timezone.utc).date(), key="replik_to")
         if st.button("Search REPLIK by date"):
             try:
                 with st.spinner("Querying REPLIK..."):

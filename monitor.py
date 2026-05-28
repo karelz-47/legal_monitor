@@ -105,7 +105,9 @@ def _extract_xml_records(root: ET.Element) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for elem in root.iter():
         local_name = elem.tag.split("}")[-1].lower()
-        if local_name not in {"konanie", "oznam"}:
+        # REPLIK list item nodes are typically KonanieInfo / VerejnyOznamInfo.
+        # Keep legacy names too in case of service-side schema variants.
+        if local_name not in {"konanie", "oznam", "konanieinfo", "verejnyoznaminfo"}:
             continue
         record: Dict[str, Any] = {}
         for child in list(elem):
@@ -165,7 +167,7 @@ def replik_search_by_ico(ico: str, page_size: int = 100) -> Dict[str, Any]:
 
     records = [{"dataset": "konanie", **item} for item in konanie["records"]] + [{"dataset": "oznam", **item} for item in oznam["records"]]
     return {
-        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "query": normalized_ico,
         "search_mode": "ico",
         "fetched": len(records),
@@ -197,7 +199,7 @@ def replik_search_by_date(date_from: str, date_to: str, page_size: int = 100) ->
     oznam = _call_replik(REPLIK_OZNAM_URL, "datatypes.oznam.verejnost.ru.sk.hp.com", oznam_body)
     records = [{"dataset": "konanie", **item} for item in konanie["records"]] + [{"dataset": "oznam", **item} for item in oznam["records"]]
     return {
-        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "since": date_from,
         "to": date_to,
         "query": f"{date_from}..{date_to}",
@@ -708,7 +710,7 @@ def perform_update_last_n_days(
 
     email_result = send_email(matched_records, recipients=email_recipients) if send_notifications else None
     return {
-        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "since": since,
         "to": to_timestamp,
         "query": query,
@@ -754,7 +756,7 @@ def perform_update(
         matched_records.extend(matched)
     email_result = send_email(matched_records, recipients=email_recipients) if send_notifications else None
     summary = {
-        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "since": since,
         "to": to_timestamp,
         "query": query,
