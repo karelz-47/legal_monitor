@@ -42,8 +42,11 @@ import base64
 import io
 import requests
 import logging
+
+import replik_ui
 import xml.etree.ElementTree as ET
 import ssl
+from xml.sax.saxutils import escape as _xml_escape
 from typing import Any, Dict, List, Optional
 from requests.adapters import HTTPAdapter
 from urllib3.poolmanager import PoolManager
@@ -167,6 +170,51 @@ def _call_replik(endpoint_url: str, action: str, body_xml: str) -> Dict[str, Any
     }
 
 
+
+def _xml_text(value: Any) -> str:
+    """Escape a value for use in a REPLIK SOAP text node."""
+    return _xml_escape(str(value), {"\"": "&quot;", "'": "&apos;"})
+
+
+def _call_replik_with_fallback(service: str, body_xml: str) -> Dict[str, Any]:
+    """Call a REPLIK service and retry the alternate endpoint on TLS failure."""
+    if service == "konanie":
+        primary_url = REPLIK_KONANIE_URL
+        fallback_url = REPLIK_ALT_KONANIE_URL
+        namespace = "datatypes.konanie.verejnost.ru.sk.hp.com"
+    elif service == "oznam":
+        primary_url = REPLIK_OZNAM_URL
+        fallback_url = REPLIK_ALT_OZNAM_URL
+        namespace = "datatypes.oznam.verejnost.ru.sk.hp.com"
+    else:
+        raise ValueError(f"Unsupported REPLIK service: {service}")
+
+    try:
+        return _call_replik(primary_url, namespace, body_xml)
+    except requests.exceptions.SSLError:
+        logger.warning("REPLIK primary endpoint TLS handshake failed; retrying on fallback endpoint.")
+        return _call_replik(fallback_url, namespace, body_xml)
+
+
+def _enrich_replik_summary(summary: Dict[str, Any], search_mode: str, query: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach normalized records, UI cards and localized summary metadata."""
+    ui_payload = replik_ui.build_ui_payload(summary.get("records", []), search_mode=search_mode, query=query)
+    summary["ui"] = ui_payload["summary"]
+    summary["normalized_records"] = ui_payload["normalized_records"]
+    summary["cards"] = ui_payload["cards"]
+    return summary
+
+
+def _build_related_notice_request(case_number: str, court_code: str, page_size: int) -> str:
+    return (
+        "<dat:getVerejnyOznamPodlaZnackyASuduRequest>"
+        f"<dat:SpisovaZnackaSudnehoSpisu>{_xml_text(case_number)}</dat:SpisovaZnackaSudnehoSpisu>"
+        f"<dat:SudKod>{_xml_text(court_code)}</dat:SudKod>"
+        "<dat:Stranka>0</dat:Stranka>"
+        f"<dat:VysledkovNaStranku>{min(page_size, 100)}</dat:VysledkovNaStranku>"
+        "</dat:getVerejnyOznamPodlaZnackyASuduRequest>"
+    )
+
 def replik_search_by_ico(ico: str, page_size: int = 100) -> Dict[str, Any]:
     normalized_ico = re.sub(r"\D", "", ico or "")
     if len(normalized_ico) != 8:
@@ -174,29 +222,24 @@ def replik_search_by_ico(ico: str, page_size: int = 100) -> Dict[str, Any]:
 
     konanie_body = (
         "<dat:getKonaniePodlaICORequest>"
-        f"<dat:Ico>{normalized_ico}</dat:Ico>"
+        f"<dat:Ico>{_xml_text(normalized_ico)}</dat:Ico>"
         "<dat:Stranka>0</dat:Stranka>"
         f"<dat:VysledkovNaStranku>{min(page_size, 100)}</dat:VysledkovNaStranku>"
         "</dat:getKonaniePodlaICORequest>"
     )
     oznam_body = (
         "<dat:getVerejneOznamyPodlaICORequest>"
-        f"<dat:Ico>{normalized_ico}</dat:Ico>"
+        f"<dat:Ico>{_xml_text(normalized_ico)}</dat:Ico>"
         "<dat:Stranka>0</dat:Stranka>"
         f"<dat:VysledkovNaStranku>{min(page_size, 100)}</dat:VysledkovNaStranku>"
         "</dat:getVerejneOznamyPodlaICORequest>"
     )
 
-    try:
-        konanie = _call_replik(REPLIK_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
-        oznam = _call_replik(REPLIK_OZNAM_URL, "datatypes.oznam.verejnost.ru.sk.hp.com", oznam_body)
-    except requests.exceptions.SSLError:
-        logger.warning("REPLIK primary endpoint TLS handshake failed; retrying on fallback endpoint.")
-        konanie = _call_replik(REPLIK_ALT_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
-        oznam = _call_replik(REPLIK_ALT_OZNAM_URL, "datatypes.oznam.verejnost.ru.sk.hp.com", oznam_body)
+    konanie = _call_replik_with_fallback("konanie", konanie_body)
+    oznam = _call_replik_with_fallback("oznam", oznam_body)
 
     records = [{"dataset": "konanie", **item} for item in konanie["records"]] + [{"dataset": "oznam", **item} for item in oznam["records"]]
-    return {
+    summary = {
         "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "query": normalized_ico,
         "search_mode": "ico",
@@ -205,35 +248,31 @@ def replik_search_by_ico(ico: str, page_size: int = 100) -> Dict[str, Any]:
         "records": records,
         "raw_xml": {"konanie": konanie["raw_xml"], "oznam": oznam["raw_xml"]},
     }
+    return _enrich_replik_summary(summary, "ico", {"ico": normalized_ico})
 
 
 def replik_search_by_date(date_from: str, date_to: str, page_size: int = 100) -> Dict[str, Any]:
     konanie_body = (
         "<dat:getKonaniePreObdobieRequest>"
-        f"<dat:DatumOd>{date_from}</dat:DatumOd>"
-        f"<dat:DatumDo>{date_to}</dat:DatumDo>"
+        f"<dat:DatumOd>{_xml_text(date_from)}</dat:DatumOd>"
+        f"<dat:DatumDo>{_xml_text(date_to)}</dat:DatumDo>"
         "<dat:Stranka>0</dat:Stranka>"
         f"<dat:VysledkovNaStranku>{min(page_size, 100)}</dat:VysledkovNaStranku>"
         "</dat:getKonaniePreObdobieRequest>"
     )
     oznam_body = (
         "<dat:getVerejneOznamyPreObdobieRequest>"
-        f"<dat:DatumOd>{date_from}</dat:DatumOd>"
-        f"<dat:DatumDo>{date_to}</dat:DatumDo>"
+        f"<dat:DatumOd>{_xml_text(date_from)}</dat:DatumOd>"
+        f"<dat:DatumDo>{_xml_text(date_to)}</dat:DatumDo>"
         "<dat:Stranka>0</dat:Stranka>"
         f"<dat:VysledkovNaStranku>{min(page_size, 100)}</dat:VysledkovNaStranku>"
         "</dat:getVerejneOznamyPreObdobieRequest>"
     )
 
-    try:
-        konanie = _call_replik(REPLIK_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
-        oznam = _call_replik(REPLIK_OZNAM_URL, "datatypes.oznam.verejnost.ru.sk.hp.com", oznam_body)
-    except requests.exceptions.SSLError:
-        logger.warning("REPLIK primary endpoint TLS handshake failed; retrying on fallback endpoint.")
-        konanie = _call_replik(REPLIK_ALT_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
-        oznam = _call_replik(REPLIK_ALT_OZNAM_URL, "datatypes.oznam.verejnost.ru.sk.hp.com", oznam_body)
+    konanie = _call_replik_with_fallback("konanie", konanie_body)
+    oznam = _call_replik_with_fallback("oznam", oznam_body)
     records = [{"dataset": "konanie", **item} for item in konanie["records"]] + [{"dataset": "oznam", **item} for item in oznam["records"]]
-    return {
+    summary = {
         "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "since": date_from,
         "to": date_to,
@@ -244,6 +283,7 @@ def replik_search_by_date(date_from: str, date_to: str, page_size: int = 100) ->
         "records": records,
         "raw_xml": {"konanie": konanie["raw_xml"], "oznam": oznam["raw_xml"]},
     }
+    return _enrich_replik_summary(summary, "period", {"dateFrom": date_from, "dateTo": date_to})
 
 
 def replik_search_full_text(query: str, page_size: int = 100, sort: str = "Relevancia") -> Dict[str, Any]:
@@ -256,25 +296,52 @@ def replik_search_full_text(query: str, page_size: int = 100, sort: str = "Relev
 
     konanie_body = (
         "<dat:vyhladajKonanieRequest>"
-        f"<dat:Query>{normalized_query}</dat:Query>"
+        f"<dat:Query>{_xml_text(normalized_query)}</dat:Query>"
         "<dat:Stranka>0</dat:Stranka>"
         f"<dat:VysledkovNaStranku>{min(page_size, 100)}</dat:VysledkovNaStranku>"
         f"<dat:TypTriedenia>{normalized_sort}</dat:TypTriedenia>"
         "</dat:vyhladajKonanieRequest>"
     )
 
-    konanie = _call_replik(REPLIK_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
-    records = [{"dataset": "konanie", **item} for item in konanie["records"]]
-    return {
-        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+    konanie = _call_replik_with_fallback("konanie", konanie_body)
+    proceeding_records = [{"dataset": "konanie", **item} for item in konanie["records"]]
+
+    related_notice_records: List[Dict[str, Any]] = []
+    related_notice_xml: List[str] = []
+    seen_notice_keys = set()
+    for proceeding in proceeding_records:
+        normalized = replik_ui.normalize_proceeding(proceeding)
+        case_number = normalized.get("caseNumber")
+        court_code = normalized.get("courtCode")
+        if not case_number or not court_code:
+            continue
+        notice_body = _build_related_notice_request(str(case_number), str(court_code), page_size)
+        try:
+            notice_response = _call_replik_with_fallback("oznam", notice_body)
+        except requests.RequestException as exc:
+            logger.warning("Failed to fetch related REPLIK notices for %s/%s: %s", case_number, court_code, exc)
+            continue
+        related_notice_xml.append(notice_response["raw_xml"])
+        for item in notice_response["records"]:
+            record = {"dataset": "oznam", **item}
+            key = record.get("OznamId") or record.get("Id") or str(sorted(record.items()))
+            if key in seen_notice_keys:
+                continue
+            seen_notice_keys.add(key)
+            related_notice_records.append(record)
+
+    records = proceeding_records + related_notice_records
+    summary = {
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat().replace("+00:00", "Z"),
         "query": normalized_query,
         "search_mode": "full_text",
         "sort": normalized_sort,
         "fetched": len(records),
         "matches": len(records),
         "records": records,
-        "raw_xml": {"konanie": konanie["raw_xml"]},
+        "raw_xml": {"konanie": konanie["raw_xml"], "oznam": "\n\n".join(related_notice_xml)},
     }
+    return _enrich_replik_summary(summary, "fulltext", {"query": normalized_query, "sort": normalized_sort})
 
 
 def parse_next_link(link_header: Optional[str]) -> Optional[str]:
