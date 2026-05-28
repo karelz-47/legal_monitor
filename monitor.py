@@ -42,6 +42,7 @@ import base64
 import io
 import requests
 import logging
+import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
 
 try:
@@ -69,6 +70,148 @@ DEFAULT_RECIPIENT = "kzvolsky@novis.eu"
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+REPLIK_KONANIE_URL = "https://replik-ws.justice.sk/ru-verejnost-ws/konanieService"
+REPLIK_OZNAM_URL = "https://replik-ws.justice.sk/ru-verejnost-ws/oznamService"
+
+
+def _extract_xml_records(root: ET.Element) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for elem in root.iter():
+        local_name = elem.tag.split("}")[-1].lower()
+        if local_name not in {"konanie", "oznam"}:
+            continue
+        record: Dict[str, Any] = {}
+        for child in list(elem):
+            key = child.tag.split("}")[-1]
+            value = (child.text or "").strip()
+            if value:
+                record[key] = value
+        if record:
+            records.append(record)
+    return records
+
+
+def _call_replik(endpoint_url: str, action: str, body_xml: str) -> Dict[str, Any]:
+    envelope = f"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:dat=\"{action}\">
+  <soapenv:Header/>
+  <soapenv:Body>
+    {body_xml}
+  </soapenv:Body>
+</soapenv:Envelope>"""
+    response = requests.post(
+        endpoint_url,
+        data=envelope.encode("utf-8"),
+        headers={"Content-Type": "text/xml; charset=utf-8", "Accept": "text/xml"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    root = ET.fromstring(response.content)
+    return {
+        "records": _extract_xml_records(root),
+        "raw_xml": response.text,
+    }
+
+
+def replik_search_by_ico(ico: str, page_size: int = 100) -> Dict[str, Any]:
+    normalized_ico = re.sub(r"\D", "", ico or "")
+    if len(normalized_ico) != 8:
+        raise ValueError("ICO must contain exactly 8 digits.")
+
+    konanie_body = (
+        "<dat:getKonaniePodlaICORequest>"
+        f"<dat:Ico>{normalized_ico}</dat:Ico>"
+        "<dat:Stranka>0</dat:Stranka>"
+        f"<dat:VysledkovNaStranku>{min(page_size, 100)}</dat:VysledkovNaStranku>"
+        "</dat:getKonaniePodlaICORequest>"
+    )
+    oznam_body = (
+        "<dat:getVerejneOznamyPodlaICORequest>"
+        f"<dat:Ico>{normalized_ico}</dat:Ico>"
+        "<dat:Stranka>0</dat:Stranka>"
+        f"<dat:VysledkovNaStranku>{min(page_size, 100)}</dat:VysledkovNaStranku>"
+        "</dat:getVerejneOznamyPodlaICORequest>"
+    )
+
+    konanie = _call_replik(REPLIK_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
+    oznam = _call_replik(REPLIK_OZNAM_URL, "datatypes.oznam.verejnost.ru.sk.hp.com", oznam_body)
+
+    records = [{"dataset": "konanie", **item} for item in konanie["records"]] + [{"dataset": "oznam", **item} for item in oznam["records"]]
+    return {
+        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+        "query": normalized_ico,
+        "search_mode": "ico",
+        "fetched": len(records),
+        "matches": len(records),
+        "records": records,
+        "raw_xml": {"konanie": konanie["raw_xml"], "oznam": oznam["raw_xml"]},
+    }
+
+
+def replik_search_by_date(date_from: str, date_to: str, page_size: int = 100) -> Dict[str, Any]:
+    konanie_body = (
+        "<dat:getKonaniePreObdobieRequest>"
+        f"<dat:DatumOd>{date_from}</dat:DatumOd>"
+        f"<dat:DatumDo>{date_to}</dat:DatumDo>"
+        "<dat:Stranka>0</dat:Stranka>"
+        f"<dat:VysledkovNaStranku>{min(page_size, 100)}</dat:VysledkovNaStranku>"
+        "</dat:getKonaniePreObdobieRequest>"
+    )
+    oznam_body = (
+        "<dat:getVerejneOznamyPreObdobieRequest>"
+        f"<dat:DatumOd>{date_from}</dat:DatumOd>"
+        f"<dat:DatumDo>{date_to}</dat:DatumDo>"
+        "<dat:Stranka>0</dat:Stranka>"
+        f"<dat:VysledkovNaStranku>{min(page_size, 100)}</dat:VysledkovNaStranku>"
+        "</dat:getVerejneOznamyPreObdobieRequest>"
+    )
+
+    konanie = _call_replik(REPLIK_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
+    oznam = _call_replik(REPLIK_OZNAM_URL, "datatypes.oznam.verejnost.ru.sk.hp.com", oznam_body)
+    records = [{"dataset": "konanie", **item} for item in konanie["records"]] + [{"dataset": "oznam", **item} for item in oznam["records"]]
+    return {
+        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+        "since": date_from,
+        "to": date_to,
+        "query": f"{date_from}..{date_to}",
+        "search_mode": "date",
+        "fetched": len(records),
+        "matches": len(records),
+        "records": records,
+        "raw_xml": {"konanie": konanie["raw_xml"], "oznam": oznam["raw_xml"]},
+    }
+
+
+def replik_search_full_text(query: str, page_size: int = 100, sort: str = "Relevancia") -> Dict[str, Any]:
+    normalized_query = (query or "").strip()
+    if not normalized_query:
+        raise ValueError("Query must not be empty.")
+
+    allowed_sort = {"DatumPoslednejUdalosti", "DatumZacatiaKonania", "Relevancia"}
+    normalized_sort = sort if sort in allowed_sort else "Relevancia"
+
+    konanie_body = (
+        "<dat:vyhladajKonanieRequest>"
+        f"<dat:Query>{normalized_query}</dat:Query>"
+        "<dat:Stranka>0</dat:Stranka>"
+        f"<dat:VysledkovNaStranku>{min(page_size, 100)}</dat:VysledkovNaStranku>"
+        f"<dat:TypTriedenia>{normalized_sort}</dat:TypTriedenia>"
+        "</dat:vyhladajKonanieRequest>"
+    )
+
+    konanie = _call_replik(REPLIK_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
+    records = [{"dataset": "konanie", **item} for item in konanie["records"]]
+    return {
+        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+        "query": normalized_query,
+        "search_mode": "full_text",
+        "sort": normalized_sort,
+        "fetched": len(records),
+        "matches": len(records),
+        "records": records,
+        "raw_xml": {"konanie": konanie["raw_xml"]},
+    }
 
 
 def parse_next_link(link_header: Optional[str]) -> Optional[str]:
