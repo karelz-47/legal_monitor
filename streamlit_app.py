@@ -32,6 +32,54 @@ if "last_records" not in st.session_state:
     st.session_state["last_records"] = []
 
 
+
+def _render_replik_summary(summary: Dict[str, Any]) -> None:
+    ui_summary = summary.get("ui") if isinstance(summary.get("ui"), dict) else {}
+    if not ui_summary:
+        return
+    st.subheader("REPLIK Summary")
+    st.info(ui_summary.get("headline", "REPLIK search complete."))
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Konania", ui_summary.get("proceedingsCount", 0))
+    col2.metric("Verejné oznamy", ui_summary.get("noticesCount", 0))
+    col3.metric("Highest severity", str(ui_summary.get("highestSeverity", "neutral")).title())
+    st.caption(ui_summary.get("explanation", ""))
+
+
+def _render_replik_card(card: Dict[str, Any], index: int) -> None:
+    severity_icon = {"critical": "🔴", "warning": "🟠", "info": "🔵", "neutral": "⚪"}.get(str(card.get("severity")), "⚪")
+    card_type = "Konanie" if card.get("type") == "proceeding" else "Verejný oznam"
+    with st.container(border=True):
+        st.markdown(f"### {severity_icon} {card.get('title', 'REPLIK result')}")
+        st.caption(f"{card_type} · {card.get('date') or 'Dátum neuvedený'}")
+        if card.get("subtitle"):
+            st.text(str(card.get("subtitle")))
+
+        badges = card.get("badges") if isinstance(card.get("badges"), list) else []
+        if badges:
+            st.markdown(" ".join(f"`{badge.get('label')}`" for badge in badges if isinstance(badge, dict)))
+
+        important_fields = [field for field in card.get("fields", []) if isinstance(field, dict) and field.get("important") and field.get("value")]
+        if important_fields:
+            columns = st.columns(min(3, len(important_fields)))
+            for col, field in zip(columns, important_fields):
+                col.metric(str(field.get("label")), str(field.get("value")))
+
+        body = card.get("body")
+        if body:
+            with st.expander("Text oznámenia"):
+                st.write(body)
+
+        with st.expander("Detail and raw REPLIK codes"):
+            detail_rows = [
+                {"Label": field.get("label"), "Value": field.get("value"), "Raw value": field.get("rawValue", "")}
+                for field in card.get("fields", [])
+                if isinstance(field, dict) and (field.get("value") or field.get("rawValue"))
+            ]
+            if detail_rows:
+                st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+            st.json({"id": card.get("id"), "type": card.get("type"), "raw": card.get("raw")})
+
 def _flatten_record(record: Dict[str, Any]) -> Dict[str, Any]:
     """Flatten nested JSON into table-friendly keys."""
     flattened: Dict[str, Any] = {}
@@ -522,14 +570,29 @@ with tabs[1]:
     if replik_summary is not None:
         replik_records = replik_summary.get("records", [])
         replik_df = _records_to_dataframe(replik_records)
-        st.subheader("Run Summary")
-        st.write({k: v for k, v in replik_summary.items() if k not in {"records", "raw_xml"}})
+        cards = replik_summary.get("cards", []) if isinstance(replik_summary.get("cards"), list) else []
 
-        st.subheader("Matching Results")
-        if replik_df.empty:
+        _render_replik_summary(replik_summary)
+
+        st.subheader("Run metadata")
+        st.write({k: v for k, v in replik_summary.items() if k not in {"records", "raw_xml", "normalized_records", "cards", "ui"}})
+
+        st.subheader("Localized result cards")
+        if not cards:
             st.info("No matching REPLIK results found.")
         else:
-            st.dataframe(replik_df, use_container_width=True)
+            for idx, card in enumerate(cards, 1):
+                if isinstance(card, dict):
+                    _render_replik_card(card, idx)
+
+        with st.expander("Normalized JSON"):
+            st.json(replik_summary.get("normalized_records", []))
+
+        with st.expander("Raw tabular REPLIK fields"):
+            if replik_df.empty:
+                st.info("No raw rows to show.")
+            else:
+                st.dataframe(replik_df, use_container_width=True)
 
         with st.expander("Source data (raw XML)"):
             raw_xml = replik_summary.get("raw_xml", {})
