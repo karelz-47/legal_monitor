@@ -43,7 +43,10 @@ import io
 import requests
 import logging
 import xml.etree.ElementTree as ET
+import ssl
 from typing import Any, Dict, List, Optional
+from requests.adapters import HTTPAdapter
+from urllib3.poolmanager import PoolManager
 
 try:
     import resend  # type: ignore
@@ -73,6 +76,31 @@ logger.setLevel(logging.INFO)
 
 REPLIK_KONANIE_URL = "https://replik-ws.justice.sk/ru-verejnost-ws/konanieService"
 REPLIK_OZNAM_URL = "https://replik-ws.justice.sk/ru-verejnost-ws/oznamService"
+REPLIK_ALT_KONANIE_URL = "https://replik-wst.justice.sk/ru-verejnost-ws/konanieService"
+REPLIK_ALT_OZNAM_URL = "https://replik-wst.justice.sk/ru-verejnost-ws/oznamService"
+
+
+class _ReplikTLSAdapter(HTTPAdapter):
+    """HTTPS adapter with a compatibility TLS profile for legacy SOAP endpoints."""
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):  # type: ignore[override]
+        ctx = ssl.create_default_context()
+        # REPLIK currently negotiates best with TLS 1.2 on some environments.
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+        # Some servers expose only older cipher suites; keep this permissive but verified.
+        ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+        pool_kwargs["ssl_context"] = ctx
+        self.poolmanager = PoolManager(
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            **pool_kwargs,
+        )
+
+
+_replik_session = requests.Session()
+_replik_session.mount("https://", _ReplikTLSAdapter())
 
 
 def _extract_xml_records(root: ET.Element) -> List[Dict[str, Any]]:
@@ -100,7 +128,7 @@ def _call_replik(endpoint_url: str, action: str, body_xml: str) -> Dict[str, Any
     {body_xml}
   </soapenv:Body>
 </soapenv:Envelope>"""
-    response = requests.post(
+    response = _replik_session.post(
         endpoint_url,
         data=envelope.encode("utf-8"),
         headers={"Content-Type": "text/xml; charset=utf-8", "Accept": "text/xml"},
@@ -134,8 +162,13 @@ def replik_search_by_ico(ico: str, page_size: int = 100) -> Dict[str, Any]:
         "</dat:getVerejneOznamyPodlaICORequest>"
     )
 
-    konanie = _call_replik(REPLIK_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
-    oznam = _call_replik(REPLIK_OZNAM_URL, "datatypes.oznam.verejnost.ru.sk.hp.com", oznam_body)
+    try:
+        konanie = _call_replik(REPLIK_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
+        oznam = _call_replik(REPLIK_OZNAM_URL, "datatypes.oznam.verejnost.ru.sk.hp.com", oznam_body)
+    except requests.exceptions.SSLError:
+        logger.warning("REPLIK primary endpoint TLS handshake failed; retrying on fallback endpoint.")
+        konanie = _call_replik(REPLIK_ALT_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
+        oznam = _call_replik(REPLIK_ALT_OZNAM_URL, "datatypes.oznam.verejnost.ru.sk.hp.com", oznam_body)
 
     records = [{"dataset": "konanie", **item} for item in konanie["records"]] + [{"dataset": "oznam", **item} for item in oznam["records"]]
     return {
@@ -167,8 +200,13 @@ def replik_search_by_date(date_from: str, date_to: str, page_size: int = 100) ->
         "</dat:getVerejneOznamyPreObdobieRequest>"
     )
 
-    konanie = _call_replik(REPLIK_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
-    oznam = _call_replik(REPLIK_OZNAM_URL, "datatypes.oznam.verejnost.ru.sk.hp.com", oznam_body)
+    try:
+        konanie = _call_replik(REPLIK_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
+        oznam = _call_replik(REPLIK_OZNAM_URL, "datatypes.oznam.verejnost.ru.sk.hp.com", oznam_body)
+    except requests.exceptions.SSLError:
+        logger.warning("REPLIK primary endpoint TLS handshake failed; retrying on fallback endpoint.")
+        konanie = _call_replik(REPLIK_ALT_KONANIE_URL, "datatypes.konanie.verejnost.ru.sk.hp.com", konanie_body)
+        oznam = _call_replik(REPLIK_ALT_OZNAM_URL, "datatypes.oznam.verejnost.ru.sk.hp.com", oznam_body)
     records = [{"dataset": "konanie", **item} for item in konanie["records"]] + [{"dataset": "oznam", **item} for item in oznam["records"]]
     return {
         "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
